@@ -28,7 +28,7 @@ module AP_MODULE_DECLARE_DATA auth_gssapi_module;
 
 APLOG_USE_MODULE(auth_gssapi);
 
-static char *mag_status(request_rec *req, int type, uint32_t err)
+static char *mag_status(apr_pool_t *pool, int type, uint32_t err)
 {
     uint32_t maj_ret, min_ret;
     gss_buffer_desc text;
@@ -47,10 +47,10 @@ static char *mag_status(request_rec *req, int type, uint32_t err)
 
         len = text.length;
         if (msg_ret) {
-            msg_ret = apr_psprintf(req->pool, "%s, %*s",
+            msg_ret = apr_psprintf(pool, "%s, %*s",
                                    msg_ret, len, (char *)text.value);
         } else {
-            msg_ret = apr_psprintf(req->pool, "%*s", len, (char *)text.value);
+            msg_ret = apr_psprintf(pool, "%*s", len, (char *)text.value);
         }
         gss_release_buffer(&min_ret, &text);
     } while (msg_ctx != 0);
@@ -58,14 +58,53 @@ static char *mag_status(request_rec *req, int type, uint32_t err)
     return msg_ret;
 }
 
-char *mag_error(request_rec *req, const char *msg, uint32_t maj, uint32_t min)
+char *mag_error(apr_pool_t *pool, const char *msg, uint32_t maj, uint32_t min)
 {
     char *msg_maj;
     char *msg_min;
 
-    msg_maj = mag_status(req, GSS_C_GSS_CODE, maj);
-    msg_min = mag_status(req, GSS_C_MECH_CODE, min);
-    return apr_psprintf(req->pool, "%s: [%s (%s)]", msg, msg_maj, msg_min);
+    msg_maj = mag_status(pool, GSS_C_GSS_CODE, maj);
+    msg_min = mag_status(pool, GSS_C_MECH_CODE, min);
+    return apr_psprintf(pool, "%s: [%s (%s)]", msg, msg_maj, msg_min);
+}
+
+enum mag_err_code {
+    MAG_NO_AUTH = 1,
+    MAG_GSS_ERR,
+    MAG_INTERNAL,
+    MAG_AUTH_NOT_ALLOWED
+};
+
+static const char *mag_err_text(enum mag_err_code err)
+{
+    switch (err) {
+    case MAG_NO_AUTH:
+        return "NO AUTH DATA";
+    case MAG_GSS_ERR:
+        return "GSS ERROR";
+    case MAG_INTERNAL:
+        return "INTERNAL ERROR";
+    case MAG_AUTH_NOT_ALLOWED:
+        return "AUTH NOT ALLOWED";
+    default:
+        return "INVALID ERROR CODE";
+    }
+}
+
+static void mag_post_error(request_rec *req, struct mag_config *cfg,
+                           enum mag_err_code err, uint32_t maj, uint32_t min,
+                           const char *msg)
+{
+    const char *text = NULL;
+
+    if (maj)
+        text = mag_error(req->pool, msg, maj, min);
+
+    if (cfg->enverrs)
+        mag_publish_error(req, maj, min, text ? text : msg, mag_err_text(err));
+
+    ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s %s", mag_err_text(err),
+                  text ? text : msg);
 }
 
 static APR_OPTIONAL_FN_TYPE(ssl_is_https) *mag_is_https = NULL;
@@ -107,7 +146,10 @@ struct mag_conn *mag_new_conn_ctx(apr_pool_t *pool)
     struct mag_conn *mc;
 
     mc = apr_pcalloc(pool, sizeof(struct mag_conn));
+
     apr_pool_create(&mc->pool, pool);
+    mc->env = apr_table_make(mc->pool, 1);
+
     /* register the context in the memory pool, so it can be freed
      * when the connection/request is terminated */
     apr_pool_cleanup_register(mc->pool, (void *)mc,
@@ -124,6 +166,7 @@ static void mag_conn_clear(struct mag_conn *mc)
     temp = mc->pool;
     memset(mc, 0, sizeof(struct mag_conn));
     mc->pool = temp;
+    mc->env = apr_table_make(mc->pool, 1);
 }
 
 static bool mag_conn_is_https(conn_rec *c)
@@ -146,20 +189,18 @@ static bool mag_acquire_creds(request_rec *req,
 #ifdef HAVE_CRED_STORE
     gss_const_key_value_set_t store = cfg->cred_store;
 
-    maj = gss_acquire_cred_from(&min, GSS_C_NO_NAME, GSS_C_INDEFINITE,
+    maj = gss_acquire_cred_from(&min, cfg->acceptor_name, GSS_C_INDEFINITE,
                                 desired_mechs, cred_usage, store, creds,
                                 actual_mechs, NULL);
 #else
-    maj = gss_acquire_cred(&min, GSS_C_NO_NAME, GSS_C_INDEFINITE,
+    maj = gss_acquire_cred(&min, cfg->acceptor_name, GSS_C_INDEFINITE,
                            desired_mechs, cred_usage, creds,
                            actual_mechs, NULL);
 #endif
 
     if (GSS_ERROR(maj)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s",
-                      mag_error(req, "gss_acquire_cred[_from]() "
-                                "failed to get server creds",
-                                maj, min));
+        mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                       "gss_acquire_cred[_from]() failed to get server creds");
         return false;
     }
 
@@ -216,7 +257,7 @@ static char *get_ccache_name(request_rec *req, char *dir, const char *gss_name,
     escaped = escape(req->pool, escaped, '/', "~");
 
     if (use_unique == false) {
-        return apr_psprintf(req->pool, "%s/%s", dir, escaped);
+        return apr_psprintf(mc->pool, "%s/%s", dir, escaped);
     }
 
     ccname = apr_psprintf(mc->pool, "%s/%s-XXXXXX", dir, escaped);
@@ -247,7 +288,7 @@ static void mag_store_deleg_creds(request_rec *req, const char *ccname,
                               GSS_C_NULL_OID, 1, 1, &store, NULL, NULL);
     if (GSS_ERROR(maj)) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s",
-                      mag_error(req, "failed to store delegated creds",
+                      mag_error(req->pool, "failed to store delegated creds",
                                 maj, min));
     }
 }
@@ -351,6 +392,7 @@ gss_OID_set mag_filter_unwanted_mechs(gss_OID_set src)
 
 static uint32_t mag_context_loop(uint32_t *min,
                                  request_rec *req,
+                                 struct mag_config *cfg,
                                  gss_cred_id_t init_cred,
                                  gss_cred_id_t accept_cred,
                                  gss_OID mech_type,
@@ -369,9 +411,8 @@ static uint32_t mag_context_loop(uint32_t *min,
     maj = gss_inquire_cred_by_mech(min, accept_cred, mech_type, &accept_name,
                                    NULL, NULL, NULL);
     if (GSS_ERROR(maj)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                      "%s", mag_error(req, "gss_inquired_cred_by_mech() "
-                                      "failed", maj, *min));
+        mag_post_error(req, cfg, MAG_GSS_ERR, maj, *min,
+                       "gss_inquired_cred_by_mech() failed");
         return maj;
     }
 
@@ -383,8 +424,8 @@ static uint32_t mag_context_loop(uint32_t *min,
                                    &accept_token, NULL, &init_token, NULL,
                                    NULL);
         if (GSS_ERROR(maj)) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s",
-                          mag_error(req, "gss_init_sec_context()", maj, *min));
+            mag_post_error(req, cfg, MAG_GSS_ERR, maj, *min,
+                           "gss_init_sec_context()");
             goto done;
         }
         gss_release_buffer(&tmin, &accept_token);
@@ -394,9 +435,8 @@ static uint32_t mag_context_loop(uint32_t *min,
                                      client, NULL, &accept_token, NULL,
                                      lifetime, delegated_cred);
         if (GSS_ERROR(maj)) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s",
-                          mag_error(req, "gss_accept_sec_context()",
-                                    maj, *min));
+            mag_post_error(req, cfg, MAG_GSS_ERR, maj, *min,
+                           "gss_accept_sec_context()");
             goto done;
         }
         gss_release_buffer(&tmin, &init_token);
@@ -438,10 +478,8 @@ static bool mag_auth_basic(request_rec *req,
 
     maj = gss_import_name(&min, &ba_user, GSS_C_NT_USER_NAME, &user);
     if (GSS_ERROR(maj)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                      "In Basic Auth, %s",
-                      mag_error(req, "gss_import_name() failed",
-                                maj, min));
+        mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                       "In Basic Auth: gss_import_name() failed");
         goto done;
     }
 
@@ -480,8 +518,8 @@ static bool mag_auth_basic(request_rec *req,
         /* in case filtered_mechs was not allocated here don't free it */
         filtered_mechs = GSS_C_NO_OID_SET;
     } else if (filtered_mechs == GSS_C_NO_OID_SET) {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, req, "Fatal "
-                      "failure while filtering mechs, aborting");
+        mag_post_error(req, cfg, MAG_INTERNAL, 0, 0,
+                       "Fatal failure while filtering mechs, aborting");
         goto done;
     } else {
         /* use the filtered list */
@@ -498,27 +536,23 @@ static bool mag_auth_basic(request_rec *req,
     maj = gss_test_oid_set_member(&min, discard_const(gss_mech_krb5),
                                   allowed_mechs, &present);
     if (GSS_ERROR(maj)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                      "In Basic Auth, %s",
-                      mag_error(req, "gss_test_oid_set_member() failed",
-                                maj, min));
+        mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                       "In Basic Auth: gss_test_oid_set_member() failed");
         goto done;
     }
     if (present) {
         rs = apr_generate_random_bytes((unsigned char *)(&rndname),
                                        sizeof(long long unsigned int));
         if (rs != APR_SUCCESS) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                          "Failed to generate random ccache name");
+            mag_post_error(req, cfg, MAG_INTERNAL, 0, 0,
+                           "Failed to generate random ccache name");
             goto done;
         }
         user_ccache = apr_psprintf(req->pool, "MEMORY:user_%qu", rndname);
         maj = gss_krb5_ccache_name(&min, user_ccache, &orig_ccache);
         if (GSS_ERROR(maj)) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                          "In Basic Auth, %s",
-                          mag_error(req, "gss_krb5_ccache_name() "
-                                    "failed", maj, min));
+            mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                          "In Basic Auth: gss_krb5_ccache_name() failed");
             goto done;
         }
     }
@@ -530,10 +564,9 @@ static bool mag_auth_basic(request_rec *req,
                                          GSS_C_INITIATE,
                                          &user_cred, &actual_mechs, NULL);
     if (GSS_ERROR(maj)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                      "In Basic Auth, %s",
-                      mag_error(req, "gss_acquire_cred_with_password() "
-                                "failed", maj, min));
+            mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                           "In Basic Auth: gss_acquire_cred_with_password() "
+                           "failed");
         goto done;
     }
 
@@ -544,7 +577,7 @@ static bool mag_auth_basic(request_rec *req,
     }
 
     for (int i = 0; i < actual_mechs->count; i++) {
-        maj = mag_context_loop(&min, req, user_cred, server_cred,
+        maj = mag_context_loop(&min, req, cfg, user_cred, server_cred,
                                &actual_mechs->elements[i], 300, client, vtime,
                                delegated_cred);
         if (maj == GSS_S_COMPLETE) {
@@ -563,9 +596,9 @@ done:
     if (user_ccache != NULL) {
         maj = gss_krb5_ccache_name(&min, orig_ccache, NULL);
         if (maj != GSS_S_COMPLETE) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, req,
                           "Failed to restore per-thread ccache, %s",
-                          mag_error(req, "gss_krb5_ccache_name() "
+                          mag_error(req->pool, "gss_krb5_ccache_name() "
                                     "failed", maj, min));
         }
     }
@@ -612,6 +645,10 @@ struct mag_req_cfg *mag_init_cfg(request_rec *req)
     return req_cfg;
 }
 
+static int mag_complete(struct mag_req_cfg *req_cfg, struct mag_conn *mc,
+                        gss_name_t client, gss_OID mech_type,
+                        uint32_t vtime, gss_cred_id_t delegated_cred);
+
 #ifdef HAVE_CRED_STORE
 static bool use_s4u2proxy(struct mag_req_cfg *req_cfg) {
     if (req_cfg->cfg->use_s4u2proxy) {
@@ -625,10 +662,6 @@ static bool use_s4u2proxy(struct mag_req_cfg *req_cfg) {
     }
     return false;
 }
-
-static int mag_complete(struct mag_req_cfg *req_cfg, struct mag_conn *mc,
-                        gss_name_t client, gss_OID mech_type,
-                        uint32_t vtime, gss_cred_id_t delegated_cred);
 
 static apr_status_t mag_s4u2self(request_rec *req)
 {
@@ -682,10 +715,8 @@ static apr_status_t mag_s4u2self(request_rec *req)
     user_name.length = strlen(user_name.value);
     maj = gss_import_name(&min, &user_name, GSS_C_NT_USER_NAME, &user);
     if (GSS_ERROR(maj)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                      "Failed to import user's name: %s",
-                      mag_error(req, "gss_import_name()",
-                                maj, min));
+        mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                       "In S4U2Self: gss_import_name()");
         goto done;
     }
 
@@ -695,26 +726,24 @@ static apr_status_t mag_s4u2self(request_rec *req)
                                             GSS_C_INITIATE, &user_cred,
                                             NULL, NULL);
     if (GSS_ERROR(maj)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                      "Failed to impersonate %s: %s", req->user,
-                      mag_error(req, "gss_acquire_cred_impersonate_name()",
-                                maj, min));
+        mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                       "In S4U2Self: gss_acquire_cred_impersonate_name()");
         goto done;
     }
 
     /* the following exchange is needed to decrypt the ticket and get named
      * attributes as well as check if the ticket is forwardable when
      * delegated credentials are requested */
-    maj = mag_context_loop(&min, req, user_cred, server_cred,
+    maj = mag_context_loop(&min, req, cfg, user_cred, server_cred,
                            discard_const(gss_mech_krb5), GSS_C_INDEFINITE,
                            &client, &vtime, &delegated_cred);
     if (GSS_ERROR(maj))
         goto done;
 
     if (cfg->deleg_ccache_dir && delegated_cred == GSS_C_NO_CREDENTIAL) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                      "Failed to obtain delegated credentials, "
-                      "does service have +ok_to_auth_as_delegate?");
+        mag_post_error(req, cfg, MAG_INTERNAL, 0, 0,
+                       "Failed to obtain delegated credentials, "
+                       "does service have +ok_to_auth_as_delegate?");
         goto done;
     }
 
@@ -817,26 +846,51 @@ static int mag_auth(request_rec *req)
 
     if ((req_cfg->desired_mechs == GSS_C_NO_OID_SET) ||
         (req_cfg->desired_mechs->count == 0)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                      "List of desired mechs is missing or empty, "
-                      "can't proceed!");
+        mag_post_error(req, cfg, MAG_INTERNAL, 0, 0,
+                       "List of desired mechs is missing or empty, "
+                       "can't proceed!");
         return HTTP_UNAUTHORIZED;
     }
 
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, req,
+                  "URI: %s, %s main, %s prev", req->uri ?: "no-uri",
+                  req->main ? "with" : "no", req->prev ? "with" : "no");
+
     /* implicit auth for subrequests if main auth already happened */
-    if (!ap_is_initial_req(req) && req->main != NULL) {
-        type = ap_auth_type(req->main);
+    if (!ap_is_initial_req(req)) {
+        request_rec *main_req = req;
+
+        /* Not initial means either a subrequest or an internal redirect */
+        while (!ap_is_initial_req(main_req))
+            if (main_req->main)
+                main_req = main_req->main;
+            else
+                main_req = main_req->prev;
+
+        type = ap_auth_type(main_req);
         if ((type != NULL) && (strcasecmp(type, "GSSAPI") == 0)) {
             /* warn if the subrequest location and the main request
              * location have different configs */
-            if (cfg != ap_get_module_config(req->main->per_dir_config,
+            if (cfg != ap_get_module_config(main_req->per_dir_config,
                                             &auth_gssapi_module)) {
                 ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0,
                               req, "Subrequest authentication bypass on "
                                    "location with different configuration!");
             }
-            if (req->main->user) {
-                req->user = apr_pstrdup(req->pool, req->main->user);
+            if (main_req->user) {
+                apr_table_t *env;
+
+                req->user = apr_pstrdup(req->pool, main_req->user);
+                req->ap_auth_type = main_req->ap_auth_type;
+
+                env = ap_get_module_config(main_req->request_config,
+                                           &auth_gssapi_module);
+                if (!env) {
+                    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, req,
+                                  "Failed to lookup env table in subrequest");
+                } else
+                    mag_export_req_env(req, env);
+
                 return OK;
             } else {
                 ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
@@ -855,8 +909,8 @@ static int mag_auth(request_rec *req)
 
     if (cfg->ssl_only) {
         if (!mag_conn_is_https(req->connection)) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                          "Not a TLS connection, refusing to authenticate!");
+            mag_post_error(req, cfg, MAG_AUTH_NOT_ALLOWED, 0, 0,
+                           "Not a TLS connection, refusing to authenticate!");
             goto done;
         }
     }
@@ -897,10 +951,18 @@ static int mag_auth(request_rec *req)
     }
 
     /* We can proceed only if we do have an auth header */
-    if (!auth_header) goto done;
+    if (!auth_header) {
+        mag_post_error(req, cfg, MAG_NO_AUTH, 0, 0,
+                       "Client did not send any authentication headers");
+        goto done;
+    }
 
     auth_header_type = ap_getword_white(req->pool, &auth_header);
-    if (!auth_header_type) goto done;
+    if (!auth_header_type) {
+        mag_post_error(req, cfg, MAG_NO_AUTH, 0, 0,
+                       "Client sent malformed authentication headers");
+        goto done;
+    }
 
     /* We got auth header, sending auth header would mean re-auth */
     send_auth_header = !cfg->negotiate_once;
@@ -920,7 +982,7 @@ static int mag_auth(request_rec *req)
         desired_mechs = mag_get_negotiate_mechs(req->pool,
                                                 req_cfg->desired_mechs);
         if (desired_mechs == GSS_C_NO_OID_SET) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, req,
                           "Failed to get negotiate_mechs");
             goto done;
         }
@@ -938,7 +1000,7 @@ static int mag_auth(request_rec *req)
 
         if (((char *)ba_user.value)[0] == '\0' ||
             ((char *)ba_pwd.value)[0] == '\0') {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, req,
                           "Invalid empty user or password for Basic Auth");
             goto done;
         }
@@ -959,8 +1021,8 @@ static int mag_auth(request_rec *req)
     case AUTH_TYPE_RAW_NTLM:
         if (!is_mech_allowed(desired_mechs, gss_mech_ntlmssp,
                              cfg->gss_conn_ctx)) {
-            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, req,
-                          "NTLM Authentication is not allowed!");
+            mag_post_error(req, cfg, MAG_AUTH_NOT_ALLOWED, 0, 0,
+                           "NTLM Authentication is not allowed!");
             goto done;
         }
 
@@ -970,13 +1032,15 @@ static int mag_auth(request_rec *req)
 
         desired_mechs = discard_const(gss_mech_set_ntlmssp);
         if (desired_mechs == GSS_C_NO_OID_SET) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                          "No support for ntlmssp mech");
+            mag_post_error(req, cfg, MAG_INTERNAL, 0 ,0,
+                           "No support for ntlmssp mech");
             goto done;
         }
         break;
 
     default:
+        mag_post_error(req, cfg, MAG_NO_AUTH, 0, 0,
+                       "Client sent unknown authentication headers");
         goto done;
     }
 
@@ -1017,9 +1081,8 @@ static int mag_auth(request_rec *req)
         cfg->allowed_mechs != GSS_C_NO_OID_SET) {
         maj = gss_set_neg_mechs(&min, acquired_cred, cfg->allowed_mechs);
         if (GSS_ERROR(maj)) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s",
-                          mag_error(req, "gss_set_neg_mechs() failed",
-                                    maj, min));
+            mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                           "In Negotiate Auth: gss_set_neg_mechs() failed");
             goto done;
         }
     }
@@ -1029,16 +1092,15 @@ static int mag_auth(request_rec *req)
                                  &client, &mech_type, &output, NULL, &vtime,
                                  &delegated_cred);
     if (GSS_ERROR(maj)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s",
-                      mag_error(req, "gss_accept_sec_context() failed",
-                                maj, min));
+        mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                       "In Negotiate Auth: gss_accept_sec_context() failed");
         goto done;
     } else if (maj == GSS_S_CONTINUE_NEEDED) {
         if (!mc->is_preserved) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
-                          "Mechanism needs continuation but neither "
-                          "GssapiConnectionBound nor "
-                          "GssapiUseSessions are available");
+            mag_post_error(req, cfg, MAG_INTERNAL, 0, 0,
+                           "Mechanism needs continuation but neither "
+                           "GssapiConnectionBound nor "
+                           "GssapiUseSessions are configured");
             gss_release_buffer(&min, &output);
             output.length = 0;
         }
@@ -1049,7 +1111,7 @@ static int mag_auth(request_rec *req)
     ret = mag_complete(req_cfg, mc, client, mech_type, vtime, delegated_cred);
 
     if (ret == OK && req_cfg->send_persist)
-        apr_table_set(req->headers_out, "Persistent-Auth",
+        apr_table_set(req->err_headers_out, "Persistent-Auth",
             cfg->gss_conn_ctx ? "true" : "false");
 
 done:
@@ -1102,9 +1164,8 @@ static int mag_complete(struct mag_req_cfg *req_cfg, struct mag_conn *mc,
 
     maj = gss_display_name(&min, client, &name, NULL);
     if (GSS_ERROR(maj)) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s",
-                      mag_error(req, "gss_display_name() failed",
-                                maj, min));
+        mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                       "gss_display_name() failed");
         goto done;
     }
 
@@ -1149,8 +1210,8 @@ static int mag_complete(struct mag_req_cfg *req_cfg, struct mag_conn *mc,
     if (cfg->map_to_local) {
         maj = gss_localname(&min, client, mech_type, &lname);
         if (maj != GSS_S_COMPLETE) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s",
-                          mag_error(req, "gss_localname() failed", maj, min));
+            mag_post_error(req, cfg, MAG_GSS_ERR, maj, min,
+                           "gss_localname() failed");
             goto done;
         }
         mc->user_name = apr_pstrndup(mc->pool, lname.value, lname.length);
@@ -1180,6 +1241,7 @@ static void *mag_create_dir_config(apr_pool_t *p, char *dir)
 
     cfg = (struct mag_config *)apr_pcalloc(p, sizeof(struct mag_config));
     cfg->pool = p;
+    cfg->ccname_envvar = "KRB5CCNAME";
 
     return cfg;
 }
@@ -1238,34 +1300,105 @@ static const char *mag_deleg_ccache_unique(cmd_parms *parms, void *mconfig,
 
 #endif
 
+#define SESS_KEYS_TOT_LEN 32
+
+static void create_sess_key_file(cmd_parms *parms, const char *name)
+{
+    apr_status_t ret;
+    apr_file_t *fd = NULL;
+    unsigned char keys[SESS_KEYS_TOT_LEN];
+    apr_size_t bw;
+
+    ret = apr_file_open(&fd, name,
+                        APR_FOPEN_CREATE | APR_FOPEN_WRITE | APR_FOPEN_EXCL,
+                        APR_FPROT_UREAD | APR_FPROT_UWRITE, parms->temp_pool);
+    if (ret != APR_SUCCESS) {
+        char err[256];
+        apr_strerror(ret, err, sizeof(err));
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                     "Failed to create key file %s: %s", name, err);
+        return;
+    }
+    ret = apr_generate_random_bytes(keys, SESS_KEYS_TOT_LEN);
+    if (ret != OK) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                     "Failed to generate random sealing key!");
+        ret = APR_INCOMPLETE;
+        goto done;
+    }
+    ret = apr_file_write_full(fd, keys, SESS_KEYS_TOT_LEN, &bw);
+    if ((ret != APR_SUCCESS) || (bw != SESS_KEYS_TOT_LEN)) {
+        char err[256];
+        apr_strerror(ret, err, sizeof(err));
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                     "Failed to store key in %s: %s", name, err);
+        ret = APR_INCOMPLETE;
+        goto done;
+    }
+done:
+    apr_file_close(fd);
+    if (ret != APR_SUCCESS) apr_file_remove(name, parms->temp_pool);
+}
+
 static const char *mag_sess_key(cmd_parms *parms, void *mconfig, const char *w)
 {
     struct mag_config *cfg = (struct mag_config *)mconfig;
     struct databuf keys;
     unsigned char *val;
     apr_status_t rc;
-    const char *k;
     int l;
 
-    if (strncmp(w, "key:", 4) != 0) {
+    if (strncmp(w, "key:", 4) == 0) {
+        const char *k = w + 4;
+
+        l = apr_base64_decode_len(k);
+        val = apr_palloc(parms->temp_pool, l);
+
+        keys.length = (int)apr_base64_decode_binary(val, k);
+        keys.value = (unsigned char *)val;
+
+        if (keys.length != SESS_KEYS_TOT_LEN) {
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                         "Invalid key length, expected 32 got %d",
+                         keys.length);
+            return NULL;
+        }
+    } else if (strncmp(w, "file:", 5) == 0) {
+        apr_status_t ret;
+        apr_file_t *fd = NULL;
+        apr_int32_t ronly = APR_FOPEN_READ;
+        const char *fname;
+
+        keys.length = SESS_KEYS_TOT_LEN;
+        keys.value = apr_palloc(parms->temp_pool, keys.length);
+
+        fname = w + 5;
+
+        ret = apr_file_open(&fd, fname, ronly, 0, parms->temp_pool);
+        if (APR_STATUS_IS_ENOENT(ret)) {
+            create_sess_key_file(parms, fname);
+
+            ret = apr_file_open(&fd, fname, ronly, 0, parms->temp_pool);
+        }
+        if (ret == APR_SUCCESS) {
+            apr_size_t br;
+            ret = apr_file_read_full(fd, keys.value, keys.length, &br);
+            apr_file_close(fd);
+            if ((ret != APR_SUCCESS) || (br != keys.length)) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                             "Failed to read sealing key from %s!", fname);
+                return NULL;
+            }
+        } else {
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                         "Failed to open key file %s", fname);
+            return NULL;
+        }
+    } else {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
-                     "Invalid key format, expected prefix 'key:'");
+                     "Invalid key format, unexpected prefix in %s'", w);
         return NULL;
     }
-    k = w + 4;
-
-    l = apr_base64_decode_len(k);
-    val = apr_palloc(parms->temp_pool, l);
-
-    keys.length = (int)apr_base64_decode_binary(val, k);
-    keys.value = (unsigned char *)val;
-
-    if (keys.length != 32) {
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
-                     "Invalid key length, expected 32 got %d", keys.length);
-        return NULL;
-    }
-
     rc = SEAL_KEY_CREATE(cfg->pool, &cfg->mag_skey, &keys);
     if (rc != OK) {
         ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
@@ -1329,6 +1462,87 @@ static const char *mag_deleg_ccache_dir(cmd_parms *parms, void *mconfig,
     struct mag_config *cfg = (struct mag_config *)mconfig;
 
     cfg->deleg_ccache_dir = apr_pstrdup(parms->pool, value);
+
+    return NULL;
+}
+
+#define CCMODE "mode:"
+#define CCUID "uid:"
+#define CCGID "gid:"
+#define NSS_BUF_LEN 2048 /* just use a uid/gid number if not big enough */
+static const char *mag_deleg_ccache_perms(cmd_parms *parms, void *mconfig,
+                                          const char *w)
+{
+    struct mag_config *cfg = (struct mag_config *)mconfig;
+
+    if (strncmp(w, CCMODE, sizeof(CCMODE) - 1) == 0) {
+        const char *p = w + sizeof(CCMODE) -1;
+        errno = 0;
+        /* mode is traditionally represented in octal, but the actual
+         * permission bit are using the 3 least significant bit of each quartet
+         * so effectively if we read an octal number as hex we get the correct
+         * mode bits */
+        cfg->deleg_ccache_mode = strtol(p, NULL, 16);
+        if (errno != 0) {
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                         "Invalid GssapiDelegCcachePerms mode value [%s]", p);
+            /* reset to the default */
+            cfg->deleg_ccache_mode = 0;
+        }
+    } else if (strncmp(w, CCUID, sizeof(CCUID) - 1) == 0) {
+        const char *p = w + sizeof(CCUID) - 1;
+        errno = 0;
+        if (isdigit(*p)) {
+            char *endptr;
+            cfg->deleg_ccache_uid = strtol(p, &endptr, 0);
+            if (errno != 0 || endptr != '\0') {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                             "Invalid GssapiDelegCcachePerms uid value [%s]",
+                             p);
+                /* reset to the default */
+                cfg->deleg_ccache_uid = 0;
+            }
+        } else {
+            struct passwd pwd, *user;
+            char buf[NSS_BUF_LEN];
+            int ret = getpwnam_r(p, &pwd, buf, NSS_BUF_LEN, &user);
+            if ((ret != 0) || user != &pwd) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                             "Invalid GssapiDelegCcachePerms uid value [%s]",
+                             p);
+            } else {
+                cfg->deleg_ccache_uid = user->pw_uid;
+            }
+        }
+    } else if (strncmp(w, CCGID, sizeof(CCGID) - 1) == 0) {
+        const char *p = w + sizeof(CCGID) - 1;
+        errno = 0;
+        if (isdigit(*p)) {
+            char *endptr;
+            cfg->deleg_ccache_gid = strtol(p, &endptr, 0);
+            if (errno != 0 || endptr != '\0') {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                             "Invalid GssapiDelegCcachePerms gid value [%s]",
+                             p);
+                /* reset to the default */
+                cfg->deleg_ccache_gid = 0;
+            }
+        } else {
+            struct group grp, *group;
+            char buf[NSS_BUF_LEN];
+            int ret = getgrnam_r(p, &grp, buf, NSS_BUF_LEN, &group);
+            if ((ret != 0) || group != &grp) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                             "Invalid GssapiDelegCcachePerms gid value [%s]",
+                             p);
+            } else {
+                cfg->deleg_ccache_gid = group->gr_gid;
+            }
+        }
+    } else {
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                     "Invalid GssapiDelegCcachePerms directive [%s]", w);
+    }
 
     return NULL;
 }
@@ -1419,8 +1633,6 @@ static const char *mag_negotiate_once(cmd_parms *parms, void *mconfig, int on)
     return NULL;
 }
 
-#define GSS_NAME_ATTR_USERDATA "GSS Name Attributes Userdata"
-
 static apr_status_t mag_name_attrs_cleanup(void *data)
 {
     struct mag_config *cfg = (struct mag_config *)data;
@@ -1494,6 +1706,24 @@ static const char *mag_basic_auth_mechs(cmd_parms *parms, void *mconfig,
 }
 #endif
 
+static const char *mag_acceptor_name(cmd_parms *parms, void *mconfig,
+                                     const char *w)
+{
+    struct mag_config *cfg = (struct mag_config *)mconfig;
+    gss_buffer_desc bufnam = { strlen(w), (void *)w };
+    uint32_t maj, min;
+
+    maj = gss_import_name(&min, &bufnam, GSS_C_NT_HOSTBASED_SERVICE,
+                          &cfg->acceptor_name);
+    if (GSS_ERROR(maj)) {
+        return apr_psprintf(parms->pool, "[%s] Failed to import name '%s' %s",
+                            parms->cmd->name, w,
+                            mag_error(parms->pool, "", maj, min));
+    }
+
+    return NULL;
+}
+
 static void *mag_create_server_config(apr_pool_t *p, server_rec *s)
 {
     struct mag_server_config *scfg;
@@ -1541,6 +1771,11 @@ static const command_rec mag_commands[] = {
                     "Credential Store"),
     AP_INIT_RAW_ARGS("GssapiDelegCcacheDir", mag_deleg_ccache_dir, NULL,
                      OR_AUTHCFG, "Directory to store delegated credentials"),
+    AP_INIT_ITERATE("GssapiDelegCcachePerms", mag_deleg_ccache_perms, NULL,
+                     OR_AUTHCFG, "Permissions to assign to Ccache files"),
+    AP_INIT_TAKE1("GssapiDelegCcacheEnvVar", ap_set_string_slot,
+                    (void *)APR_OFFSETOF(struct mag_config, ccname_envvar),
+                    OR_AUTHCFG, "Environment variable to receive ccache name"),
     AP_INIT_FLAG("GssapiDelegCcacheUnique", mag_deleg_ccache_unique, NULL,
                  OR_AUTHCFG, "Use unique ccaches for delgation"),
     AP_INIT_FLAG("GssapiImpersonate", ap_set_flag_slot,
@@ -1560,6 +1795,11 @@ static const command_rec mag_commands[] = {
                     "Don't resend negotiate header on negotiate failure"),
     AP_INIT_RAW_ARGS("GssapiNameAttributes", mag_name_attrs, NULL, OR_AUTHCFG,
                      "Name Attributes to be exported as environ variables"),
+    AP_INIT_FLAG("GssapiPublishErrors", ap_set_flag_slot,
+                 (void *)APR_OFFSETOF(struct mag_config, enverrs), OR_AUTHCFG,
+                 "Publish GSSAPI Errors in Envionment Variables"),
+    AP_INIT_RAW_ARGS("GssapiAcceptorName", mag_acceptor_name, NULL, OR_AUTHCFG,
+                     "Name of the acceptor credentials."),
     { NULL }
 };
 

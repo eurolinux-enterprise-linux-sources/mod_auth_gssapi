@@ -1,0 +1,60 @@
+From 12ebe14ee6636801c750eb6e982b30635788e4ba Mon Sep 17 00:00:00 2001
+From: Alexander Bokovoy <ab@samba.org>
+Date: Fri, 17 Mar 2017 14:17:43 +0200
+Subject: [PATCH] report file operation errors as warnings
+
+The failures to change permissions and chown the ccache do not prevent
+us from continuing to use this ccache. Log messages are confusing to
+mod_auth_gssapi users as they leave an impression things are completely
+broken.
+
+Change log level to warning to avoid filling up logs with them on error
+log level.
+
+Signed-off-by: Alexander Bokovoy <ab@samba.org>
+Reviewed-by: Simo Sorce <simo@redhat.com>
+---
+ src/environ.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/environ.c b/src/environ.c
+index 5c80b35422c278c8b3ca5d21269d987ca1e74618..66fbbe2537f78ebbf90f7d1a4fcb556a74e1e336 100644
+--- a/src/environ.c
++++ b/src/environ.c
+@@ -329,7 +329,7 @@ static void mag_set_ccname_envvar(request_rec *req, struct mag_config *cfg,
+             (finfo.protection != cfg->deleg_ccache_mode)) {
+             status = apr_file_perms_set(path, cfg->deleg_ccache_mode);
+             if (status != APR_SUCCESS)
+-                ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, req,
++                ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, req,
+                               "failed to set perms (%o) on file (%s)!",
+                               cfg->deleg_ccache_mode, path);
+         }
+@@ -337,7 +337,7 @@ static void mag_set_ccname_envvar(request_rec *req, struct mag_config *cfg,
+             (finfo.user != cfg->deleg_ccache_uid)) {
+             status = lchown(path, cfg->deleg_ccache_uid, -1);
+             if (status != 0)
+-                ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, req,
++                ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, req,
+                               "failed to set user (%u) on file (%s)!",
+                               cfg->deleg_ccache_uid, path);
+         }
+@@ -345,13 +345,13 @@ static void mag_set_ccname_envvar(request_rec *req, struct mag_config *cfg,
+             (finfo.group != cfg->deleg_ccache_gid)) {
+             status = lchown(path, -1, cfg->deleg_ccache_gid);
+             if (status != 0)
+-                ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, req,
++                ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, req,
+                               "failed to set group (%u) on file (%s)!",
+                               cfg->deleg_ccache_gid, path);
+         }
+     } else {
+         /* set the file cache anyway, but warn */
+-        ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, req,
++        ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, req,
+                       "KRB5CCNAME file (%s) lookup failed!", path);
+     }
+ 
+-- 
+1.8.3.1
+

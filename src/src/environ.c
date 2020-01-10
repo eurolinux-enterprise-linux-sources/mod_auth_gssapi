@@ -28,11 +28,19 @@ static bool mag_get_name_attr(request_rec *req,
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
                       "gss_get_name_attribute() failed on %.*s%s",
                       (int)attr->name.length, (char *)attr->name.value,
-                      mag_error(req, "", maj, min));
+                      mag_error(req->pool, "", maj, min));
         return false;
     }
 
     return true;
+}
+
+static apr_status_t mag_mc_name_attrs_cleanup(void *data)
+{
+    struct mag_conn *mc = (struct mag_conn *)data;
+    free(mc->name_attributes);
+    mc->name_attributes = NULL;
+    return 0;
 }
 
 static void mc_add_name_attribute(struct mag_conn *mc,
@@ -44,6 +52,8 @@ static void mc_add_name_attribute(struct mag_conn *mc,
         size = sizeof(struct mag_attr) * (mc->na_count + 16);
         mc->name_attributes = realloc(mc->name_attributes, size);
         if (!mc->name_attributes) apr_pool_abort_get(mc->pool)(ENOMEM);
+        apr_pool_userdata_setn(mc, GSS_NAME_ATTR_USERDATA,
+                               mag_mc_name_attrs_cleanup, mc->pool);
     }
 
     mc->name_attributes[mc->na_count].name = apr_pstrdup(mc->pool, name);
@@ -87,6 +97,65 @@ static void mag_set_env_name_attr(request_rec *req, struct mag_conn *mc,
     }
 }
 
+static char *mag_escape_display_value(request_rec *req,
+                                      gss_buffer_desc disp_value)
+{
+    /* This function returns a copy (in the pool) of the given gss_buffer_t
+     * where some characters are escaped as required by RFC4627. The string is
+     * NULL terminated */
+    char *value = disp_value.value;
+    char *escaped_value = NULL;
+    char *p = NULL;
+
+    /* gss_buffer_t are not \0 terminated, but our result will be. Hence,
+     * escaped length will be original length * 6 + 1 in the worst case */
+    p = escaped_value = apr_palloc(req->pool, disp_value.length * 6 + 1);
+    for (size_t i = 0; i < disp_value.length; i++) {
+        switch (value[i]) {
+        case '"':
+            memcpy(p, "\\\"", 2);
+            p += 2;
+            break;
+        case '\\':
+            memcpy(p, "\\\\", 2);
+            p += 2;
+            break;
+        case '\b':
+            memcpy(p, "\\b", 2);
+            p += 2;
+            break;
+        case '\t':
+            memcpy(p, "\\t", 2);
+            p += 2;
+            break;
+        case '\r':
+            memcpy(p, "\\r", 2);
+            p += 2;
+            break;
+        case '\f':
+            memcpy(p, "\\f", 2);
+            p += 2;
+            break;
+        case '\n':
+            memcpy(p, "\\n", 2);
+            p += 2;
+            break;
+        default:
+            if (value[i] <= 0x1F) {
+                apr_snprintf(p, 7, "\\u%04d", (int)value[i]);
+                p += 6;
+            } else {
+                *p = value[i];
+                p += 1;
+            }
+            break;
+        }
+    }
+    /* make the string NULL terminated */
+    *p = '\0';
+    return escaped_value;
+}
+
 static void mag_add_json_name_attr(request_rec *req, bool first,
                                    struct name_attr *attr, char **json)
 {
@@ -106,8 +175,8 @@ static void mag_add_json_name_attr(request_rec *req, bool first,
                                    attr->value.length);
     }
     if (attr->display_value.length != 0) {
-        len = attr->display_value.length;
-        value = (const char *)attr->display_value.value;
+        value = mag_escape_display_value(req, attr->display_value);
+        len = strlen(value);
     }
     if (attr->number == 1) {
         *json = apr_psprintf(req->pool,
@@ -166,9 +235,9 @@ void mag_get_name_attributes(request_rec *req, struct mag_config *cfg,
 
     maj = gss_inquire_name(&min, name, NULL, NULL, &attrs);
     if (GSS_ERROR(maj)) {
-        error = mag_error(req, "gss_inquire_name() failed", maj, min);
+        error = mag_error(req->pool, "gss_inquire_name() failed", maj, min);
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s", error);
-        apr_table_set(req->subprocess_env, "GSS_NAME_ATTR_ERROR", error);
+        apr_table_set(mc->env, "GSS_NAME_ATTR_ERROR", error);
         return;
     }
 
@@ -237,43 +306,77 @@ void mag_get_name_attributes(request_rec *req, struct mag_config *cfg,
 static void mag_set_name_attributes(request_rec *req, struct mag_conn *mc)
 {
     for (int i = 0; i < mc->na_count; i++) {
-        apr_table_set(req->subprocess_env,
+        apr_table_set(mc->env,
                       mc->name_attributes[i].name,
                       mc->name_attributes[i].value);
     }
 }
 
-static void mag_set_KRB5CCNAME(request_rec *req, const char *dir,
-                               const char *ccname)
+static void mag_set_ccname_envvar(request_rec *req, struct mag_config *cfg,
+                                  struct mag_conn *mc)
 {
     apr_status_t status;
-    apr_finfo_t finfo;
+    apr_int32_t wanted = APR_FINFO_MIN | APR_FINFO_OWNER | APR_FINFO_PROT;
+    apr_finfo_t finfo = { 0 };
     char *path;
     char *value;
 
-    path = apr_psprintf(req->pool, "%s/%s", dir, ccname);
+    path = apr_psprintf(req->pool, "%s/%s", cfg->deleg_ccache_dir, mc->ccname);
 
-    status = apr_stat(&finfo, path, APR_FINFO_MIN, req->pool);
-    if (status != APR_SUCCESS && status != APR_INCOMPLETE) {
+    status = apr_stat(&finfo, path, wanted, req->pool);
+    if (status == APR_SUCCESS) {
+        if ((cfg->deleg_ccache_mode != 0) &&
+            (finfo.protection != cfg->deleg_ccache_mode)) {
+            status = apr_file_perms_set(path, cfg->deleg_ccache_mode);
+            if (status != APR_SUCCESS)
+                ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, req,
+                              "failed to set perms (%o) on file (%s)!",
+                              cfg->deleg_ccache_mode, path);
+        }
+        if ((cfg->deleg_ccache_uid != 0) &&
+            (finfo.user != cfg->deleg_ccache_uid)) {
+            status = lchown(path, cfg->deleg_ccache_uid, -1);
+            if (status != 0)
+                ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, req,
+                              "failed to set user (%u) on file (%s)!",
+                              cfg->deleg_ccache_uid, path);
+        }
+        if ((cfg->deleg_ccache_gid != 0) &&
+            (finfo.group != cfg->deleg_ccache_gid)) {
+            status = lchown(path, -1, cfg->deleg_ccache_gid);
+            if (status != 0)
+                ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, req,
+                              "failed to set group (%u) on file (%s)!",
+                              cfg->deleg_ccache_gid, path);
+        }
+    } else {
         /* set the file cache anyway, but warn */
         ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, req,
                       "KRB5CCNAME file (%s) lookup failed!", path);
     }
 
     value = apr_psprintf(req->pool, "FILE:%s", path);
-    apr_table_set(req->subprocess_env, "KRB5CCNAME", value);
+    apr_table_set(mc->env, cfg->ccname_envvar, value);
+}
+
+void mag_export_req_env(request_rec *req, apr_table_t *env)
+{
+    const apr_array_header_t *arr = apr_table_elts(env);
+    const apr_table_entry_t *elts = (const apr_table_entry_t*)arr->elts;
+
+    for (int i = 0; i < arr->nelts; ++i)
+        apr_table_set(req->subprocess_env, elts[i].key, elts[i].val);
 }
 
 void mag_set_req_data(request_rec *req,
                       struct mag_config *cfg,
                       struct mag_conn *mc)
 {
-    apr_table_set(req->subprocess_env, "GSS_NAME", mc->gss_name);
-    apr_table_set(req->subprocess_env, "GSS_SESSION_EXPIRATION",
+    apr_table_set(mc->env, "GSS_NAME", mc->gss_name);
+    apr_table_set(mc->env, "GSS_SESSION_EXPIRATION",
                   apr_psprintf(req->pool,
                                "%ld", (long)mc->expiration));
-    req->ap_auth_type = apr_pstrdup(req->pool,
-                                    mag_str_auth_type(mc->auth_type));
+    req->ap_auth_type = (char *) mag_str_auth_type(mc->auth_type);
     req->user = apr_pstrdup(req->pool, mc->user_name);
 
     if (mc->name_attributes) {
@@ -282,7 +385,24 @@ void mag_set_req_data(request_rec *req,
 
 #ifdef HAVE_CRED_STORE
     if (cfg->deleg_ccache_dir && mc->delegated && mc->ccname) {
-        mag_set_KRB5CCNAME(req, cfg->deleg_ccache_dir, mc->ccname);
+        mag_set_ccname_envvar(req, cfg, mc);
     }
 #endif
+
+    ap_set_module_config(req->request_config, &auth_gssapi_module, mc->env);
+    mag_export_req_env(req, mc->env);
+}
+
+void mag_publish_error(request_rec *req, uint32_t maj, uint32_t min,
+                       const char *gss_err, const char *mag_err)
+{
+    if (gss_err) {
+        apr_table_set(req->subprocess_env, "GSS_ERROR_MAJ",
+                      apr_psprintf(req->pool, "%u", (unsigned)maj));
+        apr_table_set(req->subprocess_env, "GSS_ERROR_MIN",
+                      apr_psprintf(req->pool, "%u", (unsigned)min));
+        apr_table_set(req->subprocess_env, "MAG_ERROR_TEXT", gss_err);
+    }
+    if (mag_err)
+        apr_table_set(req->subprocess_env, "MAG_ERROR", mag_err);
 }

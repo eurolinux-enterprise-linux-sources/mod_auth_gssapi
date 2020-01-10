@@ -36,6 +36,10 @@
 #  include <gssapi/gssapi_ntlmssp.h>
 #endif
 
+#include <ctype.h>
+#include <pwd.h>
+#include <grp.h>
+
 #include "crypto.h"
 #include "sessions.h"
 #include "environ.h"
@@ -47,6 +51,9 @@
 #define HAVE_CRED_STORE 1
 #  endif
 #endif
+
+extern module AP_MODULE_DECLARE_DATA auth_gssapi_module;
+#define GSS_NAME_ATTR_USERDATA "GSS Name Attributes Userdata"
 
 struct mag_na_map {
     char *env_name;
@@ -69,9 +76,13 @@ struct mag_config {
 #ifdef HAVE_CRED_STORE
     bool use_s4u2proxy;
     char *deleg_ccache_dir;
+    mode_t deleg_ccache_mode;
+    uid_t deleg_ccache_uid;
+    gid_t deleg_ccache_gid;
     gss_key_value_set_desc *cred_store;
-    bool deleg_ccache_unique;;
+    bool deleg_ccache_unique;
     bool s4u2self;
+    char *ccname_envvar;
 #endif
     struct seal_key *mag_skey;
 
@@ -80,6 +91,8 @@ struct mag_config {
     gss_OID_set_desc *basic_mechs;
     bool negotiate_once;
     struct mag_name_attributes *name_attributes;
+    bool enverrs;
+    gss_name_t acceptor_name;
 };
 
 struct mag_server_config {
@@ -117,10 +130,11 @@ struct mag_conn {
     int na_count;
     struct mag_attr *name_attributes;
     const char *ccname;
+    apr_table_t *env;
 };
 
 #define discard_const(ptr) ((void *)((uintptr_t)(ptr)))
 
 struct mag_conn *mag_new_conn_ctx(apr_pool_t *pool);
 const char *mag_str_auth_type(int auth_type);
-char *mag_error(request_rec *req, const char *msg, uint32_t maj, uint32_t min);
+char *mag_error(apr_pool_t *pool, const char *msg, uint32_t maj, uint32_t min);

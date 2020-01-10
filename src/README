@@ -144,10 +144,21 @@ admin can choose to install a permanent key in the configuration so that
 session data remain accessible after a restart or by multiple servers
 sharing the same key.
 
-The key must be a base64 encoded raw key of 32 bytes of length.
+Two schemes to read persistent keys are provided, 'key' and 'file'.
 
-#### Example
+- 'key'
+    A key is read from the configuration directive.
+    The key must be a base64 encoded raw key of 32 bytes of length.
+
+- 'file'
+    A file on the file system is used to store the key. If the file does not
+    exists one is created with a randomly generated key during the first
+    execution.
+
+
+#### Examples
     GssapiSessionKey key:VGhpcyBpcyBhIDMyIGJ5dGUgbG9uZyBzZWNyZXQhISE=
+    GssapiSessionKey file:/var/lib/httpd/secrets/session.key
 
 
 ### GssapiCredStore
@@ -165,8 +176,8 @@ options like keytab location, client_keytab location, ccache location etc.
 If delegation of credentials is desired credentials can be exported in a
 private directory accessible by the Apache process.
 The delegated credentials will be stored in a file named after the client
-principal and the subprocess environment variable KRB5CCNAME will be set
-to point to that file.
+principal and a request environment variable (`KRB5CCNAME` by default) will be
+set to point to that file.
 
 #### Example
     GssapiDelegCcacheDir /var/run/httpd/clientcaches
@@ -187,6 +198,16 @@ in the contrib directory.
 
 #### Example
     GssapiDelegCcacheUnique On
+
+
+### GssapiDelegCcacheEnvVar
+
+Set the name of the request environment variable that will receive the
+credential cache name.  If unspecified, defaults to `KRB5CCNAME`.
+
+#### Example
+    GssapiDelegCcacheEnvVar AJP_KRB5CCNAME
+
 
 ### GssapiUseS4U2Proxy
 
@@ -326,3 +347,74 @@ delegation, for example with the option +ok_to_auth_as_delegate.
 
 - **Enable with:** GssapiImpersonate On
 - **Default:** GssapiImpersonate Off
+
+
+### GssapiDelegCcachePerms
+
+This option is used to set alternative ownership and permission for delegated
+ccache files stored in the GssapiDelegCcacheDir location. It is a multivalue
+configuration directive that can accept the following three settings:
+- mode
+- uid
+- gid
+If a setting is not present the relative file property will not be modified and
+the default owners and/or mode will be retained.
+
+#### mode
+    This option allows to set the file mode, the format used is a numeric mode
+    with the same semantics of the chmod unix command for mapping numbers to
+    permissions.
+
+#### uid
+    A user id number or name, an attempt to change the user owner of the file
+    to the uid number specified will be made. If a user name has been
+    specified, it will be resolved at startup time and the user's id number
+    stored internally for all subsequent operations.
+
+#### gid
+    A group id number or name, an attempt to change the group owner of the
+    file to the gid number specified will be made. If a group name has been
+    specified, it will be resolved at startup time and the group's id number
+    stored internally for all subsequent operations.
+
+#### Example
+    GssapiDelegCcachePerms mode:0660 gid:webuiworkers
+
+
+### GssapiPublishErrors
+
+This option is used to publish errors as Environment Variables for use by
+httpd processes.
+
+A general error type is provided in the MAG_ERROR variable, and can have the
+following values: "GSS ERROR", "INTERNAL ERROR", "AUTH NOT ALLOWED"
+Additionally, in the variable named MAG_ERROR_TEXT there may be a free form
+error message.
+
+When the error type is "GSS ERROR" the variables GSS_ERROR_MAJ and
+GSS_ERROR_MIN contain the numeric errors returned by GSSAPI, and the
+MAG_ERROR_TEXT will contain a GSS Error message, possibly prepended by
+an additional message that provides more context.
+
+- **Enable with:** GssapiPublishErrors On
+- **Default:** GssapiPublishErrors Off
+
+
+### GssapiAcceptorName
+
+This option is used to force the server to accept only for a specific name.
+
+This allows, for example to select to use a specific credential when multiple
+keys are provided in a keytab.
+
+Note: By default no name is set and any name in a keytab or mechanism specific
+acceptor credential will be allowed.
+
+Note: Global gssapi options set in krb5.conf like 'ignore_acceptor_hostname'
+may affect the ability to restrict names.
+
+Note: The GSS_C_NT_HOSTBASED_SERVICE format is used for names (see example).
+
+#### Example
+    GssapiAcceptorName HTTP@www.example.com
+

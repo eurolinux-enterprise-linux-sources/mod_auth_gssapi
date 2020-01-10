@@ -1,12 +1,14 @@
 Name:           mod_auth_gssapi
-Version:        1.4.0
-Release:        1%{?dist}
+Version:        1.5.1
+Release:        2%{?dist}
 Summary:        A GSSAPI Authentication module for Apache
 
 Group:          System Environment/Daemons
 License:        MIT
 URL:            https://github.com/modauthgssapi/mod_auth_gssapi
 Source0:        https://github.com/modauthgssapi/%{name}/releases/download/v%{version}/%name-%{version}.tar.gz
+
+Patch01:        0001-report-file-operation-errors-as-warnings.patch
 
 BuildRequires:  httpd-devel, krb5-devel, openssl-devel, autoconf, automake, libtool
 Requires:       httpd-mmn = %{_httpd_mmn}
@@ -18,6 +20,7 @@ SPNEGO based HTTP Authentication protocol defined in RFC4559.
 
 %prep
 %setup -q
+%patch01 -p1
 
 %build
 export APXS=%{_httpd_apxs}
@@ -43,6 +46,14 @@ install -m 644 10-auth_gssapi.conf %{buildroot}%{_httpd_modconfdir}
 %{_httpd_moddir}/mod_auth_gssapi.so
 
 %changelog
+* Mon Mar 27 2017 Simo Sorce <simo@redhat.com> - 1.5.1-2
+- Fix log level on some messages
+- resolves: #1433362
+
+* Thu Mar  9 2017 Simo Sorce <simo@redhat.com> - 1.5.1-1
+- Korabl-Sputnik 4 launch (1.5.1)
+- resolves: #1403194
+
 * Tue Jun 21 2016 Simo Sorce <simo@redhat.com> 1.4.0-1
 - Lunar Reconnaissance Orbiter (2009) release (1.4.0)
 - resolves: #1346883
