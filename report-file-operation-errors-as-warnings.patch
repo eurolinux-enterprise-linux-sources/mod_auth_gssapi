@@ -1,4 +1,4 @@
-From 12ebe14ee6636801c750eb6e982b30635788e4ba Mon Sep 17 00:00:00 2001
+From d4256f0aa908b7b828bbefc89e712b09c6e87968 Mon Sep 17 00:00:00 2001
 From: Alexander Bokovoy <ab@samba.org>
 Date: Fri, 17 Mar 2017 14:17:43 +0200
 Subject: [PATCH] report file operation errors as warnings
@@ -13,12 +13,13 @@ log level.
 
 Signed-off-by: Alexander Bokovoy <ab@samba.org>
 Reviewed-by: Simo Sorce <simo@redhat.com>
+(cherry picked from commit 12ebe14ee6636801c750eb6e982b30635788e4ba)
 ---
  src/environ.c | 8 ++++----
  1 file changed, 4 insertions(+), 4 deletions(-)
 
 diff --git a/src/environ.c b/src/environ.c
-index 5c80b35422c278c8b3ca5d21269d987ca1e74618..66fbbe2537f78ebbf90f7d1a4fcb556a74e1e336 100644
+index 5c80b35..66fbbe2 100644
 --- a/src/environ.c
 +++ b/src/environ.c
 @@ -329,7 +329,7 @@ static void mag_set_ccname_envvar(request_rec *req, struct mag_config *cfg,
@@ -55,6 +56,3 @@ index 5c80b35422c278c8b3ca5d21269d987ca1e74618..66fbbe2537f78ebbf90f7d1a4fcb556a
                        "KRB5CCNAME file (%s) lookup failed!", path);
      }
  
--- 
-1.8.3.1
-

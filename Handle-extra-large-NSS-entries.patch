@@ -1,0 +1,168 @@
+From 43992c5d7b138a11339a725242863b5d001d21bb Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Tue, 3 Oct 2017 12:31:02 -0400
+Subject: [PATCH] Handle extra large NSS entries
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+Reviewed-by: Robbie Harwood <rharwood@redhat.com>
+
+Closes #152
+
+(cherry picked from commit 9813eb46c6c415a933c5edf5076fd0a8e39c86b2)
+[rharwood@redhat.com: conflicts due to no lex/yacc stuff yet]
+---
+ src/Makefile.am       |  2 +-
+ src/mod_auth_gssapi.c | 26 +++++++-------------
+ src/mod_auth_gssapi.h |  2 ++
+ src/util.c            | 66 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 78 insertions(+), 18 deletions(-)
+ create mode 100644 src/util.c
+
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 0605261..d8dd3ec 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -8,7 +8,7 @@ dist_noinst_HEADERS = \
+     mod_auth_gssapi.h crypto.h sessions.h environ.h
+ 
+ mod_auth_gssapi_la_SOURCES = \
+-    mod_auth_gssapi.c crypto.c sessions.c environ.c
++    mod_auth_gssapi.c crypto.c sessions.c environ.c util.c
+ mod_auth_gssapi_la_CFLAGS = \
+     $(MAG_CFLAGS)
+ mod_auth_gssapi_la_LIBADD = \
+diff --git a/src/mod_auth_gssapi.c b/src/mod_auth_gssapi.c
+index 74962d1..c2dd039 100644
+--- a/src/mod_auth_gssapi.c
++++ b/src/mod_auth_gssapi.c
+@@ -1476,7 +1476,7 @@ static const char *mag_deleg_ccache_dir(cmd_parms *parms, void *mconfig,
+ #define CCMODE "mode:"
+ #define CCUID "uid:"
+ #define CCGID "gid:"
+-#define NSS_BUF_LEN 2048 /* just use a uid/gid number if not big enough */
++
+ static const char *mag_deleg_ccache_perms(cmd_parms *parms, void *mconfig,
+                                           const char *w)
+ {
+@@ -1510,15 +1510,11 @@ static const char *mag_deleg_ccache_perms(cmd_parms *parms, void *mconfig,
+                 cfg->deleg_ccache_uid = 0;
+             }
+         } else {
+-            struct passwd pwd, *user;
+-            char buf[NSS_BUF_LEN];
+-            int ret = getpwnam_r(p, &pwd, buf, NSS_BUF_LEN, &user);
+-            if ((ret != 0) || user != &pwd) {
++            int ret = mag_get_user_uid(p, &cfg->deleg_ccache_uid);
++            if (ret != 0) {
+                 ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+-                             "Invalid GssapiDelegCcachePerms uid value [%s]",
+-                             p);
+-            } else {
+-                cfg->deleg_ccache_uid = user->pw_uid;
++                    "Invalid GssapiDelegCcachePerms uid value [%s](%s)",
++                    p, strerror(ret));
+             }
+         }
+     } else if (strncmp(w, CCGID, sizeof(CCGID) - 1) == 0) {
+@@ -1535,15 +1531,11 @@ static const char *mag_deleg_ccache_perms(cmd_parms *parms, void *mconfig,
+                 cfg->deleg_ccache_gid = 0;
+             }
+         } else {
+-            struct group grp, *group;
+-            char buf[NSS_BUF_LEN];
+-            int ret = getgrnam_r(p, &grp, buf, NSS_BUF_LEN, &group);
+-            if ((ret != 0) || group != &grp) {
++            int ret = mag_get_group_gid(p, &cfg->deleg_ccache_gid);
++            if (ret != 0) {
+                 ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+-                             "Invalid GssapiDelegCcachePerms gid value [%s]",
+-                             p);
+-            } else {
+-                cfg->deleg_ccache_gid = group->gr_gid;
++                    "Invalid GssapiDelegCcachePerms gid value [%s](%s)",
++                    p, strerror(ret));
+             }
+         }
+     } else {
+diff --git a/src/mod_auth_gssapi.h b/src/mod_auth_gssapi.h
+index 159d6b7..2ea52a3 100644
+--- a/src/mod_auth_gssapi.h
++++ b/src/mod_auth_gssapi.h
+@@ -138,3 +138,5 @@ struct mag_conn {
+ struct mag_conn *mag_new_conn_ctx(apr_pool_t *pool);
+ const char *mag_str_auth_type(int auth_type);
+ char *mag_error(apr_pool_t *pool, const char *msg, uint32_t maj, uint32_t min);
++int mag_get_user_uid(const char *name, uid_t *uid);
++int mag_get_group_gid(const char *name, gid_t *gid);
+diff --git a/src/util.c b/src/util.c
+new file mode 100644
+index 0000000..6b2a4a0
+--- /dev/null
++++ b/src/util.c
+@@ -0,0 +1,66 @@
++/* Copyright (C) 2017 mod_auth_gssapi contributors - See COPYING for (C) terms */
++
++#include "mod_auth_gssapi.h"
++
++#define NSS_BUF_MIN 1024
++#define NSS_BUF_MAX 1024*1024
++static char *get_buf(char *cur, size_t *len)
++{
++    if (*len == 0) {
++        *len = NSS_BUF_MIN;
++    } else {
++        *len *= 2;
++    }
++    if (*len > NSS_BUF_MAX) {
++        *len = 0; /* will free the buf and return NULL */
++    }
++    return realloc(cur, *len);
++}
++
++int mag_get_user_uid(const char *name, uid_t *uid)
++{
++    struct passwd pwd, *user;
++    size_t buflen = 0;
++    char *buf = NULL;
++    int ret;
++
++    do {
++        buf = get_buf(buf, &buflen);
++        if (buf == NULL || buflen == 0) {
++            ret = ENOMEM;
++            break;
++        }
++        ret = getpwnam_r(name, &pwd, buf, buflen, &user);
++    } while (ret == ERANGE);
++    if (ret != 0 || user != &pwd) {
++        ret = (ret == 0) ? EINVAL : ret;
++    } else {
++        *uid = user->pw_uid;
++    }
++    free(buf);
++    return ret;
++}
++
++int mag_get_group_gid(const char *name, gid_t *gid)
++{
++    struct group grp, *group;
++    size_t buflen = 0;
++    char *buf = NULL;
++    int ret;
++
++    do {
++        buf = get_buf(buf, &buflen);
++        if (buf == NULL || buflen == 0) {
++            ret = ENOMEM;
++            break;
++        }
++        ret = getgrnam_r(name, &grp, buf, buflen, &group);
++    } while (ret == ERANGE);
++    if (ret != 0 || group != &grp) {
++        ret = (ret == 0) ? EINVAL : ret;
++    } else {
++        *gid = group->gr_gid;
++    }
++    free(buf);
++    return ret;
++}

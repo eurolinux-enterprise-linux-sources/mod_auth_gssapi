@@ -1,0 +1,163 @@
+From 96a8f82b0b9a84a7ba7ba84965978ab27674b802 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Mon, 24 Apr 2017 15:40:33 -0400
+Subject: [PATCH] Allow admins to selectively suppress negotiation
+
+If the admin sets the gssapi-no-negotiate requets enironemnt variable,
+then we suppress the ability to send Negotiate headers.
+This is useful to slectively send negotiate only to specific whielisted
+or blacklisted browsers, clients, IP Addresses, etc... based on
+directives like BrowserMatch or SetEnvIf.
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+Resolves #135
+(cherry picked from commit 114e4408523ca4d06da32c265680b9faa74ad882)
+---
+ src/mod_auth_gssapi.c | 13 ++++++++++---
+ tests/httpd.conf      | 13 +++++++++++++
+ tests/magtests.py     | 19 +++++++++++++++++++
+ tests/t_nonego.py     | 29 +++++++++++++++++++++++++++++
+ 4 files changed, 71 insertions(+), 3 deletions(-)
+ create mode 100755 tests/t_nonego.py
+
+diff --git a/src/mod_auth_gssapi.c b/src/mod_auth_gssapi.c
+index 755654d..59120d1 100644
+--- a/src/mod_auth_gssapi.c
++++ b/src/mod_auth_gssapi.c
+@@ -833,7 +833,7 @@ static int mag_auth(request_rec *req)
+     gss_OID_set desired_mechs = GSS_C_NO_OID_SET;
+     struct mag_conn *mc = NULL;
+     int i;
+-    bool send_auth_header = true;
++    bool send_nego_header = true;
+ 
+     type = ap_auth_type(req);
+     if ((type == NULL) || (strcasecmp(type, "GSSAPI") != 0)) {
+@@ -907,6 +907,11 @@ static int mag_auth(request_rec *req)
+         }
+     }
+ 
++    /* check if admin wants to disable negotiate with this client */
++    if (apr_table_get(req->subprocess_env, "gssapi-no-negotiate")) {
++        send_nego_header = false;
++    }
++
+     if (cfg->ssl_only) {
+         if (!mag_conn_is_https(req->connection)) {
+             mag_post_error(req, cfg, MAG_AUTH_NOT_ALLOWED, 0, 0,
+@@ -965,7 +970,9 @@ static int mag_auth(request_rec *req)
+     }
+ 
+     /* We got auth header, sending auth header would mean re-auth */
+-    send_auth_header = !cfg->negotiate_once;
++    if (cfg->negotiate_once) {
++            send_nego_header = false;
++    }
+ 
+     for (i = 0; auth_types[i] != NULL; i++) {
+         if (strcasecmp(auth_header_type, auth_types[i]) == 0) {
+@@ -1126,7 +1133,7 @@ done:
+             apr_table_add(req->err_headers_out, req_cfg->rep_proto, reply);
+         }
+     } else if (ret == HTTP_UNAUTHORIZED) {
+-        if (send_auth_header) {
++        if (send_nego_header) {
+             apr_table_add(req->err_headers_out,
+                           req_cfg->rep_proto, "Negotiate");
+             if (is_mech_allowed(desired_mechs, gss_mech_ntlmssp,
+diff --git a/tests/httpd.conf b/tests/httpd.conf
+index 7879727..e17cf0a 100644
+--- a/tests/httpd.conf
++++ b/tests/httpd.conf
+@@ -211,6 +211,19 @@ CoreDumpDirectory "${HTTPROOT}"
+   Require valid-user
+ </Location>
+ 
++<Location /nonego>
++  BrowserMatch NONEGO gssapi-no-negotiate
++  AuthType GSSAPI
++  AuthName "Login"
++  GssapiSSLonly Off
++  GssapiCredStore ccache:${HTTPROOT}/tmp/httpd_krb5_ccache
++  GssapiCredStore client_keytab:${HTTPROOT}/http.keytab
++  GssapiCredStore keytab:${HTTPROOT}/http.keytab
++  GssapiBasicAuth On
++  GssapiAllowedMech krb5
++  Require valid-user
++</Location>
++
+ <VirtualHost *:${PROXYPORT}>
+   ProxyRequests On
+   ProxyVia On
+diff --git a/tests/magtests.py b/tests/magtests.py
+index a008d81..4d276df 100755
+--- a/tests/magtests.py
++++ b/tests/magtests.py
+@@ -410,6 +410,23 @@ def test_bad_acceptor_name(testdir, testenv, testlog):
+             sys.stderr.write('BAD ACCEPTOR: FAILED\n')
+ 
+ 
++def test_no_negotiate(testdir, testenv, testlog):
++
++    nonego_dir = os.path.join(testdir, 'httpd', 'html', 'nonego')
++    os.mkdir(nonego_dir)
++    shutil.copy('tests/index.html', nonego_dir)
++
++    with (open(testlog, 'a')) as logfile:
++        spnego = subprocess.Popen(["tests/t_nonego.py"],
++                                  stdout=logfile, stderr=logfile,
++                                  env=testenv, preexec_fn=os.setsid)
++        spnego.wait()
++        if spnego.returncode != 0:
++            sys.stderr.write('NO Negotiate: FAILED\n')
++        else:
++            sys.stderr.write('NO Negotiate: SUCCESS\n')
++
++
+ if __name__ == '__main__':
+ 
+     args = parse_args()
+@@ -454,6 +471,8 @@ if __name__ == '__main__':
+         testenv.update(kdcenv)
+         test_basic_auth_krb5(testdir, testenv, testlog)
+ 
++        test_no_negotiate(testdir, testenv, testlog)
++
+     finally:
+         with (open(testlog, 'a')) as logfile:
+             for name in processes:
+diff --git a/tests/t_nonego.py b/tests/t_nonego.py
+new file mode 100755
+index 0000000..c4f2bdd
+--- /dev/null
++++ b/tests/t_nonego.py
+@@ -0,0 +1,29 @@
++#!/usr/bin/python
++# Copyright (C) 2015 - mod_auth_gssapi contributors, see COPYING for license.
++
++import os
++import requests
++
++
++if __name__ == '__main__':
++    url = 'http://%s/nonego/' % (os.environ['NSS_WRAPPER_HOSTNAME'])
++
++    # ensure a 401 with the appropriate WWW-Authenticate header is returned
++    # when no auth is provided
++    r = requests.get(url)
++    if r.status_code != 401:
++        raise ValueError('NO Negotiate failed - 401 expected')
++    if not (r.headers.get("WWW-Authenticate") and
++            r.headers.get("WWW-Authenticate").startswith("Negotiate")):
++        raise ValueError('NO Negotiate failed - WWW-Authenticate '
++                         'Negotiate header is absent')
++
++    # ensure a 401 with the WWW-Authenticate Negotiate header is absent
++    # when the special User-Agent is sent
++    r = requests.get(url, headers={'User-Agent': 'NONEGO'})
++    if r.status_code != 401:
++        raise ValueError('NO Negotiate failed - 401 expected')
++    if (r.headers.get("WWW-Authenticate") and
++        r.headers.get("WWW-Authenticate").startswith("Negotiate")):
++        raise ValueError('NO Negotiate failed - WWW-Authenticate '
++                         'Negotiate header is present, should be absent')

@@ -1,6 +1,6 @@
 Name:           mod_auth_gssapi
 Version:        1.5.1
-Release:        2%{?dist}
+Release:        5%{?dist}
 Summary:        A GSSAPI Authentication module for Apache
 
 Group:          System Environment/Daemons
@@ -8,7 +8,11 @@ License:        MIT
 URL:            https://github.com/modauthgssapi/mod_auth_gssapi
 Source0:        https://github.com/modauthgssapi/%{name}/releases/download/v%{version}/%name-%{version}.tar.gz
 
-Patch01:        0001-report-file-operation-errors-as-warnings.patch
+Patch0: report-file-operation-errors-as-warnings.patch
+Patch1: Allow-admins-to-selectively-suppress-negotiation.patch
+Patch2: Fix-strtol-error-checking.patch
+Patch3: Handle-extra-large-NSS-entries.patch
+Patch4: Document-gssapi-no-negotiate.patch
 
 BuildRequires:  httpd-devel, krb5-devel, openssl-devel, autoconf, automake, libtool
 Requires:       httpd-mmn = %{_httpd_mmn}
@@ -20,7 +24,11 @@ SPNEGO based HTTP Authentication protocol defined in RFC4559.
 
 %prep
 %setup -q
-%patch01 -p1
+%patch0 -p1 -b .report-file-operation-errors-as-warnings
+%patch1 -p1 -b .Allow-admins-to-selectively-suppress-negotiation
+%patch2 -p1 -b .Fix-strtol-error-checking
+%patch3 -p1 -b .Handle-extra-large-NSS-entries
+%patch4 -p1 -b .Document-gssapi-no-negotiate
 
 %build
 export APXS=%{_httpd_apxs}
@@ -46,6 +54,18 @@ install -m 644 10-auth_gssapi.conf %{buildroot}%{_httpd_modconfdir}
 %{_httpd_moddir}/mod_auth_gssapi.so
 
 %changelog
+* Fri Oct 27 2017 Robbie Harwood <rharwood@redhat.com> - 1.5.1-5
+- Document gssapi-no-negotiate
+- Resolves: #1309041
+
+* Wed Oct 04 2017 Robbie Harwood <rharwood@redhat.com> - 1.5.1-4
+- Handle large NSS entries (>1024)
+- Resolves: #1498176
+
+* Mon Oct 02 2017 Robbie Harwood <rharwood@redhat.com> - 1.5.1-3
+- Allow admins to suppress negotiation selectively
+- Resolves: #1309041
+
 * Mon Mar 27 2017 Simo Sorce <simo@redhat.com> - 1.5.1-2
 - Fix log level on some messages
 - resolves: #1433362
@@ -66,6 +86,6 @@ install -m 644 10-auth_gssapi.conf %{buildroot}%{_httpd_modconfdir}
 - resolves: #1258172
 - resolves: #1258456
 
-* Thu Apr 21 2015 Simo Sorce <simo@redhat.com> 1.2.0-1
+* Wed Apr 29 2015 Simo Sorce <simo@redhat.com> 1.2.0-1
 - First RHEL release
 - resolves: #1205367

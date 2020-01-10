@@ -1,0 +1,34 @@
+From 26a82531170a046c3f8d04e85276e8bd118a36ce Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Tue, 3 Oct 2017 12:33:38 -0400
+Subject: [PATCH] Fix strtol error checking
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+Reviewed-by: Robbie Harwood <rharwood@redhat.com>
+(cherry picked from commit 7cddf31b6ea7d0c67ac8a086d6b61d3f3631f47c)
+---
+ src/mod_auth_gssapi.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/mod_auth_gssapi.c b/src/mod_auth_gssapi.c
+index 59120d1..74962d1 100644
+--- a/src/mod_auth_gssapi.c
++++ b/src/mod_auth_gssapi.c
+@@ -1502,7 +1502,7 @@ static const char *mag_deleg_ccache_perms(cmd_parms *parms, void *mconfig,
+         if (isdigit(*p)) {
+             char *endptr;
+             cfg->deleg_ccache_uid = strtol(p, &endptr, 0);
+-            if (errno != 0 || endptr != '\0') {
++            if (errno != 0 || (endptr && *endptr != '\0')) {
+                 ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                              "Invalid GssapiDelegCcachePerms uid value [%s]",
+                              p);
+@@ -1527,7 +1527,7 @@ static const char *mag_deleg_ccache_perms(cmd_parms *parms, void *mconfig,
+         if (isdigit(*p)) {
+             char *endptr;
+             cfg->deleg_ccache_gid = strtol(p, &endptr, 0);
+-            if (errno != 0 || endptr != '\0') {
++            if (errno != 0 || (endptr && *endptr != '\0')) {
+                 ap_log_error(APLOG_MARK, APLOG_ERR, 0, parms->server,
+                              "Invalid GssapiDelegCcachePerms gid value [%s]",
+                              p);
