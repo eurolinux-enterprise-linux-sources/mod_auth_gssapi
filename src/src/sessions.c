@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 mod_auth_gssapi authors - See COPYING for (C) terms */
+/* Copyright (C) 2014, 2016 mod_auth_gssapi contributors - See COPYING for (C) terms */
 
 #include "mod_auth_gssapi.h"
 #include "asn1c/GSSSessionData.h"
@@ -109,6 +109,7 @@ void mag_check_session(struct mag_req_cfg *cfg, struct mag_conn **conn)
     mc = *conn;
     if (!mc) {
         *conn = mc = mag_new_conn_ctx(req->pool);
+        mc->is_preserved = true;
     }
 
     rc = mag_session_get(req, sess, MAG_BEARER_KEY, &sessval);
@@ -157,6 +158,7 @@ void mag_check_session(struct mag_req_cfg *cfg, struct mag_conn **conn)
     expiration = gsessdata->expiration;
     if (expiration < time(NULL)) {
         /* credentials fully expired, return nothing */
+        mc->established = false;
         goto done;
     }
 
@@ -176,6 +178,12 @@ void mag_check_session(struct mag_req_cfg *cfg, struct mag_conn **conn)
     mc->basic_hash.value = apr_palloc(mc->pool, mc->basic_hash.length);
     memcpy(mc->basic_hash.value,
            gsessdata->basichash.buf, gsessdata->basichash.size);
+
+    /* ccname */
+    mc->ccname = apr_pstrndup(mc->pool,
+                              (char *)gsessdata->ccname.buf,
+                              gsessdata->ccname.size);
+    if (!mc->ccname) goto done;
 
     /* OK we have a valid token */
     mc->established = true;
@@ -213,7 +221,13 @@ void mag_attempt_session(struct mag_req_cfg *cfg, struct mag_conn *mc)
 
     gsessdata.established = mc->established?1:0;
     gsessdata.delegated = mc->delegated?1:0;
+
+    if (sess->expiry != 0) {
+        mc->expiration = mc->expiration < apr_time_sec(sess->expiry) ?
+                         mc->expiration : apr_time_sec(sess->expiry);
+    }
     gsessdata.expiration = mc->expiration;
+
     if (OCTET_STRING_fromString(&gsessdata.username, mc->user_name) != 0)
         goto done;
     if (OCTET_STRING_fromString(&gsessdata.gssname, mc->gss_name) != 0)
@@ -221,6 +235,8 @@ void mag_attempt_session(struct mag_req_cfg *cfg, struct mag_conn *mc)
     if (OCTET_STRING_fromBuf(&gsessdata.basichash,
                              (const char *)mc->basic_hash.value,
                              mc->basic_hash.length) != 0)
+        goto done;
+    if (OCTET_STRING_fromString(&gsessdata.ccname, mc->ccname) != 0)
         goto done;
     ret = encode_GSSSessionData(req->pool, &gsessdata,
                                 &plainbuf.value, &plainbuf.length);

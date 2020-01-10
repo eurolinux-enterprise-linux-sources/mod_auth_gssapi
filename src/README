@@ -24,13 +24,17 @@ provided without these extensions.
 
 To run tests, you also need:
 
-* The Kerberos 5 Key-Distribution-Center (`krb5-kdc` package on Debian)
-* [nss_wrapper](https://cwrap.org/nss_wrapper.html)
-* [socket_wrapper](https://cwrap.org/socket_wrapper.html)
+* The Kerberos 5 Key-Distribution-Center (`krb5-kdc` package on Debian,
+  `krb5-server` on Fedora)
+* Packages `mod_session`, `krb5-workstation`, `python-requests-kerberos`,
+  and `python-gssapi` on Fedora
+* [nss_wrapper](https://cwrap.org/nss_wrapper.html), packaged in Fedora
+* [socket_wrapper](https://cwrap.org/socket_wrapper.html), packaged in Fedora
 
 Installation
 ------------
 
+    autoreconf -fi
     ./configure
     make
     make install
@@ -119,7 +123,7 @@ to handle cookies so that module needs to be activated and configured.
 GSSAPI uses a secured (encrypted + MAC-ed) payload to maintain state in the
 session cookie. The session cookie lifetime depends on the lifetime of the
 GSSAPI session established at authentication.
-NOTE: It is important to correctly set the SessionCookieName option.
+**NOTE**: It is important to correctly set the SessionCookieName option.
 See the
 [mod_sessions](http://httpd.apache.org/docs/current/mod/mod_session.html)
 documentation for more information.
@@ -171,6 +175,19 @@ A user foo@EXAMPLE.COM delegating its credentials would cause the server to
 create a ccache file named /var/run/httpd/clientcaches/foo@EXAMPLE.COM
 
 
+### GssapiDelegCcacheUnique
+
+Enables using unique ccache names for delegation.  ccache files will be placed
+in GssapiDelegCcacheDir and named using the principal and a six-digit unique
+suffix.
+
+**Note:** Consuming application must delete the ccache otherwise it will
+litter the filesystem if sessions are used.  An example sweeper can be found
+in the contrib directory.
+
+#### Example
+    GssapiDelegCcacheUnique On
+
 ### GssapiUseS4U2Proxy
 
 Enables the use of the s4u2Proxy Kerberos extension also known as
@@ -181,6 +198,9 @@ behalf of the user against other servers by using the provided ticket
 This options requires GssapiDelegCcacheDir to be set. The ccache will be
 populated with the user's provided ticket which is later used as evidence
 ticket by the application.
+
+**Note:** This flag has no effect when Basic-Auth is used since user's
+credentials are delegated anyway when GssapiDelegCcacheDir is set.
 
 #### Example
     GssapiUseS4U2Proxy On
@@ -196,9 +216,9 @@ keytab and store a ccache in the configured ccache file.
 
 ### GssapiBasicAuth
 Allows the use of Basic Auth in conjunction with Negotiate.
-If the browser fails to use Negotiate is will instead fallback to Basic and
+If the browser fails to use Negotiate it will instead fallback to Basic and
 the username and password will be used to try to acquire credentials in the
-module via GSSAPI. If credentials are acquire successfully then they are
+module via GSSAPI. If credentials are acquired successfully then they are
 validated against the server's keytab.
 
 - **Enable with:** GssapiBasicAuth On
@@ -237,3 +257,72 @@ The recognized mechanism names are: krb5, iakerb, ntlmssp
 
 #### Example
     GssapiBasicAuthMech krb5
+
+
+### GssapiNameAttributes
+
+Enables the module to source Name Attributes from the client name
+(authorization data associated with the established context) and exposes them
+as environment variables.
+
+Value format: ENV_VAR_NAME ATTRIBUTE_NAME
+
+This option can be specified multiple times, once for each attribute to expose.
+The Special value "json" is used to expose all attributes in a json formatted
+string via the special environment variable GSS_NAME_ATTRS_JSON
+The environment variable GSS_NAME_ATTR_ERROR is set with the Gssapi returned
+error string in case the inquire name function fails to retrieve attributes,
+and with the string "0 attributes found", if no attributes are set.
+
+**Note**: These variables are NOT saved in the session data stored in the
+cookie so they are available only on the first authenticated request when
+GssapiUseSessions is used.
+
+**Note:** It is recommended but not required to use only capital letters and
+underscores for environment variable names.
+
+#### Example
+    GssapiNameAttributes json
+    GssapiNameAttributes RADIUS_NAME urn:ietf:params:gss:radius-attribute_1
+
+
+### GssapiNegotiateOnce
+
+When this option is enabled the Negotiate header will not be resent if
+Negotiation has already been attempted but failed.
+
+Normally when a client fails to use Negotiate authentication, a HTTP 401
+response is returned with a WWW-Authenticate: Negotiate header, implying that
+the client can retry to use Negotiate with different credentials or a
+different mechanism.
+
+Consider enabling GssapiNegotiateOnce when only one single sign on mechanism
+is allowed, or when GssapiBasicAuth is enabled.
+
+**NOTE:** if the initial Negotiate attempt fails, some browsers will fallback
+to other Negotiate mechanisms, prompting the user for login credentials and
+reattempting negotiation. This situation can mislead users - for example if
+krb5 authentication failed and no other mechanisms are allowed, a user could
+be prompted for login information even though any login information provided
+cannot succeed. When this occurs, some browsers will not fall back to a Basic
+Auth mechanism. Enable GssapiNegotiateOnce to avoid this situation.
+
+- **Enable with:** GssapiNegotiateOnce On
+- **Default:** GssapiNegotiateOnce Off
+
+### GssapiImpersonate
+
+This option can be used even if AuthType GSSAPI is not used for given
+Location or LocationMatch, to obtain service ticket for a user that was
+already authenticated by different module.
+
+The principal of the user is retrieved from the internal r->user
+identifier which typically holds the username from the authentication
+results.
+
+Make sure the server principal is set to allow to acquire forwardable
+tickets to itself from arbitrary users, for use with constrained
+delegation, for example with the option +ok_to_auth_as_delegate.
+
+- **Enable with:** GssapiImpersonate On
+- **Default:** GssapiImpersonate Off

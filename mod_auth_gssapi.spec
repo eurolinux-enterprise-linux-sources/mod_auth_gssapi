@@ -1,16 +1,12 @@
 Name:           mod_auth_gssapi
-Version:        1.3.1
-Release:        3%{?dist}
+Version:        1.4.0
+Release:        1%{?dist}
 Summary:        A GSSAPI Authentication module for Apache
 
 Group:          System Environment/Daemons
 License:        MIT
 URL:            https://github.com/modauthgssapi/mod_auth_gssapi
 Source0:        https://github.com/modauthgssapi/%{name}/releases/download/v%{version}/%name-%{version}.tar.gz
-
-Patch0:         0001-Implement-unique-ccache-names.patch
-Patch1:         0002-Fix-cred-cache-detection.patch
-Patch2:         Fix-backport.patch
 
 BuildRequires:  httpd-devel, krb5-devel, openssl-devel, autoconf, automake, libtool
 Requires:       httpd-mmn = %{_httpd_mmn}
@@ -22,9 +18,6 @@ SPNEGO based HTTP Authentication protocol defined in RFC4559.
 
 %prep
 %setup -q
-%patch0 -p1
-%patch1 -p1
-%patch2 -p1
 
 %build
 export APXS=%{_httpd_apxs}
@@ -50,13 +43,10 @@ install -m 644 10-auth_gssapi.conf %{buildroot}%{_httpd_modconfdir}
 %{_httpd_moddir}/mod_auth_gssapi.so
 
 %changelog
-* Thu Jun 30 2016 Simo Sorce <simo@redhat.com> 1.3.1-3
-- Fix backport issue
-- related: #1347175
-
-* Wed Jun 15 2016 Simo Sorce <simo@redhat.com> 1.3.1-2
-- Add Unique ccache support
-- resolves: #1347175
+* Tue Jun 21 2016 Simo Sorce <simo@redhat.com> 1.4.0-1
+- Lunar Reconnaissance Orbiter (2009) release (1.4.0)
+- resolves: #1346883
+- resolves: #1343422
 
 * Thu Sep  3 2015 Simo Sorce <simo@redhat.com> 1.3.1-1
 - Various bugfixes and minor new features

@@ -94,7 +94,7 @@ ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps = $(top_srcdir)/m4/libtool.m4 \
 	$(top_srcdir)/m4/ltoptions.m4 $(top_srcdir)/m4/ltsugar.m4 \
 	$(top_srcdir)/m4/ltversion.m4 $(top_srcdir)/m4/lt~obsolete.m4 \
-	$(top_srcdir)/configure.ac
+	$(top_srcdir)/version.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(dist_noinst_HEADERS) \
@@ -134,7 +134,8 @@ am__installdirs = "$(DESTDIR)$(magdir)"
 LTLIBRARIES = $(mag_LTLIBRARIES)
 mod_auth_gssapi_la_DEPENDENCIES = asn1c/libmagasn1.la
 am_mod_auth_gssapi_la_OBJECTS = mod_auth_gssapi_la-mod_auth_gssapi.lo \
-	mod_auth_gssapi_la-crypto.lo mod_auth_gssapi_la-sessions.lo
+	mod_auth_gssapi_la-crypto.lo mod_auth_gssapi_la-sessions.lo \
+	mod_auth_gssapi_la-environ.lo
 mod_auth_gssapi_la_OBJECTS = $(am_mod_auth_gssapi_la_OBJECTS)
 AM_V_lt = $(am__v_lt_@AM_V@)
 am__v_lt_ = $(am__v_lt_@AM_DEFAULT_V@)
@@ -259,6 +260,7 @@ LIBTOOL = @LIBTOOL@
 LIPO = @LIPO@
 LN_S = @LN_S@
 LTLIBOBJS = @LTLIBOBJS@
+LT_SYS_LIBRARY_PATH = @LT_SYS_LIBRARY_PATH@
 MAG_CFLAGS = @MAG_CFLAGS@
 MAG_LIBDIR = @MAG_LIBDIR@
 MAG_LIBS = @MAG_LIBS@
@@ -348,10 +350,10 @@ mag_LTLIBRARIES = \
     mod_auth_gssapi.la
 
 dist_noinst_HEADERS = \
-    mod_auth_gssapi.h crypto.h sessions.h
+    mod_auth_gssapi.h crypto.h sessions.h environ.h
 
 mod_auth_gssapi_la_SOURCES = \
-    mod_auth_gssapi.c crypto.c sessions.c
+    mod_auth_gssapi.c crypto.c sessions.c environ.c
 
 mod_auth_gssapi_la_CFLAGS = \
     $(MAG_CFLAGS)
@@ -460,6 +462,7 @@ distclean-compile:
 	-rm -f *.tab.c
 
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mod_auth_gssapi_la-crypto.Plo@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mod_auth_gssapi_la-environ.Plo@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mod_auth_gssapi_la-mod_auth_gssapi.Plo@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mod_auth_gssapi_la-sessions.Plo@am__quote@
 
@@ -507,6 +510,13 @@ mod_auth_gssapi_la-sessions.lo: sessions.c
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='sessions.c' object='mod_auth_gssapi_la-sessions.lo' libtool=yes @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
 @am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(mod_auth_gssapi_la_CFLAGS) $(CFLAGS) -c -o mod_auth_gssapi_la-sessions.lo `test -f 'sessions.c' || echo '$(srcdir)/'`sessions.c
+
+mod_auth_gssapi_la-environ.lo: environ.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(mod_auth_gssapi_la_CFLAGS) $(CFLAGS) -MT mod_auth_gssapi_la-environ.lo -MD -MP -MF $(DEPDIR)/mod_auth_gssapi_la-environ.Tpo -c -o mod_auth_gssapi_la-environ.lo `test -f 'environ.c' || echo '$(srcdir)/'`environ.c
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/mod_auth_gssapi_la-environ.Tpo $(DEPDIR)/mod_auth_gssapi_la-environ.Plo
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='environ.c' object='mod_auth_gssapi_la-environ.lo' libtool=yes @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(mod_auth_gssapi_la_CFLAGS) $(CFLAGS) -c -o mod_auth_gssapi_la-environ.lo `test -f 'environ.c' || echo '$(srcdir)/'`environ.c
 
 mostlyclean-libtool:
 	-rm -f *.lo
@@ -725,8 +735,8 @@ uninstall-am: uninstall-magLTLIBRARIES
 
 
 install-exec-local:
-	if test ! -d ${APXS_LIBEXECDIR}; then mkdir -p ${APXS_LIBEXECDIR}; fi
-	@APXS@ -i -S LIBEXECDIR=${APXS_LIBEXECDIR} mod_auth_gssapi.la
+	test -d $(DESTDIR)$(APXS_LIBEXECDIR) || mkdir -p $(DESTDIR)$(APXS_LIBEXECDIR)
+	@APXS@ -i -n mod_auth_gssapi -S LIBEXECDIR=$(DESTDIR)$(APXS_LIBEXECDIR) mod_auth_gssapi.la
 
 clean-local:
 	rm -f mod_auth_gssapi.slo mod_auth_gssapi.la mod_auth_gssapi.lo .libs
