@@ -1,0 +1,85 @@
+diff -uPr mod_auth_gssapi-1.3.1.orig/src/mod_auth_gssapi.c mod_auth_gssapi-1.3.1.new/src/mod_auth_gssapi.c
+--- mod_auth_gssapi-1.3.1.orig/src/mod_auth_gssapi.c	2016-06-30 12:30:36.364868486 -0400
++++ mod_auth_gssapi-1.3.1.new/src/mod_auth_gssapi.c	2016-06-30 13:24:26.042162365 -0400
+@@ -711,12 +711,10 @@
+     uint32_t maj, min;
+     char *reply;
+     size_t replen;
+-    char *clientname;
+     gss_OID mech_type = GSS_C_NO_OID;
+     gss_OID_set desired_mechs = GSS_C_NO_OID_SET;
+     gss_buffer_desc lname = GSS_C_EMPTY_BUFFER;
+     struct mag_conn *mc = NULL;
+-    time_t expiration;
+     int i;
+ 
+     type = ap_auth_type(req);
+@@ -877,8 +875,6 @@
+         mag_conn_clear(mc);
+     }
+ 
+-    req->ap_auth_type = apr_pstrdup(req->pool, auth_types[auth_type]);
+-
+ #ifdef HAVE_CRED_STORE
+     if (use_s4u2proxy(req_cfg)) {
+         cred_usage = GSS_C_BOTH;
+@@ -941,11 +937,15 @@
+                                 maj, min));
+         goto done;
+     }
+-    clientname = apr_pstrndup(req->pool, name.value, name.length);
+-    apr_table_set(req->subprocess_env, "GSS_NAME", clientname);
+-    expiration = time(NULL) + vtime;
+-    apr_table_set(req->subprocess_env, "GSS_SESSION_EXPIRATION",
+-                  apr_psprintf(req->pool, "%ld", (long)expiration));
++
++    if (!mc) {
++        mc = mag_new_conn_ctx(req->pool);
++    }
++    mc->gss_name = apr_pstrndup(req->pool, name.value, name.length);
++    if (vtime == GSS_C_INDEFINITE || vtime < MIN_SESS_EXP_TIME) {
++        vtime = MIN_SESS_EXP_TIME;
++    }
++    mc->expiration = time(NULL) + vtime;
+ 
+ #ifdef HAVE_CRED_STORE
+     if (cfg->deleg_ccache_dir && delegated_cred != GSS_C_NO_CREDENTIAL) {
+@@ -983,27 +983,21 @@
+                           mag_error(req, "gss_localname() failed", maj, min));
+             goto done;
+         }
+-        req->user = apr_pstrndup(req->pool, lname.value, lname.length);
++        mc->user_name = apr_pstrndup(req->pool, lname.value, lname.length);
+     } else {
+-        req->user = clientname;
++        mc->user_name = mc->gss_name;
+     }
+ 
+-    if (mc) {
+-        mc->user_name = apr_pstrdup(mc->pool, req->user);
+-        mc->gss_name = apr_pstrdup(mc->pool, clientname);
+-        mc->established = true;
+-        if (vtime == GSS_C_INDEFINITE || vtime < MIN_SESS_EXP_TIME) {
+-            vtime = MIN_SESS_EXP_TIME;
+-        }
+-        mc->expiration = expiration;
+-        mc->auth_type = auth_type;
+-        if (auth_type == AUTH_TYPE_BASIC) {
+-            mag_basic_cache(req_cfg, mc, ba_user, ba_pwd);
+-        }
+-        if (req_cfg->use_sessions) {
+-            mag_attempt_session(req_cfg, mc);
+-        }
++    mc->established = true;
++    mc->auth_type = auth_type;
++    if (auth_type == AUTH_TYPE_BASIC) {
++        mag_basic_cache(req_cfg, mc, ba_user, ba_pwd);
+     }
++    if (req_cfg->use_sessions) {
++        mag_attempt_session(req_cfg, mc);
++    }
++
++    mag_set_req_data(req, cfg, mc);
+ 
+     if (req_cfg->send_persist)
+         apr_table_set(req->headers_out, "Persistent-Auth",
